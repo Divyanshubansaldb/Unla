@@ -90,8 +90,7 @@ const getGatewayBaseUrl = () => {
 
 // Helper to get direct gateway base URL using modifier
 const getDirectGatewayBaseUrl = () => {
-  let modifier =
-    (RUNTIME_CONFIG.VITE_DIRECT_MCP_GATEWAY_MODIFIER as string) || ':5235';
+  let modifier = (window.RUNTIME_CONFIG?.VITE_DIRECT_MCP_GATEWAY_MODIFIER as string) || ':5235';
   const origin = window.location.origin.replace(/\/+$/, '');
 
   if (modifier.startsWith('http')) {
