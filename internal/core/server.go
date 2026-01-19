@@ -61,16 +61,17 @@ type (
 		// shutdownCh is used to signal shutdown to all SSE connections
 		shutdownCh chan struct{}
 		// toolRespHandler is a chain of response handlers
-		toolRespHandler ResponseHandler
-		lastUpdateTime  time.Time
-		auth            auth.Auth
-		forwardConfig   config.ForwardConfig
-		traceCapture    apptrace.CaptureConfig
-		tracingService  string // OTel service name for tracing
-		metrics         *metrics.Metrics
-		metricsPath     string
-		toolAccess      config.ToolAccessConfig
-		internalNetACL  internalNetworkAllowlist
+		toolRespHandler    ResponseHandler
+		lastUpdateTime     time.Time
+		auth               auth.Auth
+		forwardConfig      config.ForwardConfig
+		traceCapture       apptrace.CaptureConfig
+		tracingService     string // OTel service name for tracing
+		metrics            *metrics.Metrics
+		metricsPath        string
+		toolAccess         config.ToolAccessConfig
+		internalNetACL     internalNetworkAllowlist
+		internalNetEnabled bool
 		// Pre-parsed header lists for efficient lookup
 		ignoreHeaders   []string
 		allowHeaders    []string
@@ -165,6 +166,7 @@ func (s *Server) applyForwardConfig(cfg config.ForwardConfig) {
 // applyToolAccessConfig sets tool access config and parses internal allowlists.
 func (s *Server) applyToolAccessConfig(cfg config.ToolAccessConfig) {
 	s.toolAccess = cfg
+	s.internalNetEnabled = cfg.InternalNetwork.Enabled == nil || *cfg.InternalNetwork.Enabled
 	allowlist, invalid := parseInternalNetworkAllowlist(cfg.InternalNetwork.Allowlist)
 	if len(invalid) > 0 {
 		s.logger.Warn("invalid internal network allowlist entries",

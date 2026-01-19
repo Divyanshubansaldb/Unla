@@ -67,6 +67,8 @@ type (
 
 	// InternalNetworkAccessConfig defines allowlist for internal network targets.
 	InternalNetworkAccessConfig struct {
+		// Enabled controls whether internal network access validation is enabled.
+		Enabled   *bool      `yaml:"enabled"`
 		Allowlist StringList `yaml:"allowlist"`
 	}
 

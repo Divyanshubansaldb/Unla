@@ -103,6 +103,11 @@ func isInternalAddr(addr netip.Addr) bool {
 }
 
 func (s *Server) validateToolEndpoint(ctx context.Context, endpoint *url.URL) error {
+	// Skip validation if internal network access check is disabled
+	if !s.internalNetEnabled {
+		return nil
+	}
+
 	if endpoint == nil {
 		return fmt.Errorf("tool endpoint is empty")
 	}
