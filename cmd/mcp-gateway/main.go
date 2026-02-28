@@ -18,6 +18,7 @@ import (
 	"github.com/amoylab/unla/internal/mcp/storage/notifier"
 	pidHelper "github.com/amoylab/unla/pkg/helper"
 	"github.com/amoylab/unla/pkg/logger"
+	"github.com/amoylab/unla/pkg/trace"
 	"github.com/amoylab/unla/pkg/utils"
 	"github.com/amoylab/unla/pkg/version"
 
@@ -167,7 +168,7 @@ func run() {
 	}
 
 	// Initialize session store
-	sessionStore, err := session.NewStore(logger, &cfg.Session)
+	sessionStore, err := session.NewStore(ctx, logger, &cfg.Session)
 	if err != nil {
 		logger.Fatal("failed to initialize session store",
 			zap.String("type", cfg.Session.Type),
@@ -180,11 +181,51 @@ func run() {
 		logger.Fatal("Failed to initialize auth service", zap.Error(err))
 	}
 
-	// Create server instance
-	server, err := core.NewServer(logger, cfg.Port, store, sessionStore, a, cfg.Forward)
+	// Initialize tracing BEFORE creating server if enabled
+	var tracingServiceName string
+	if cfg.Tracing.Enabled {
+		if cfg.Tracing.ServiceName == "" {
+			cfg.Tracing.ServiceName = "mcp-gateway"
+		}
+		tracingServiceName = cfg.Tracing.ServiceName
+
+		shutdown, err := trace.InitTracing(ctx, &cfg.Tracing, logger)
+		if err != nil {
+			logger.Error("Failed to initialize tracing", zap.Error(err))
+		} else {
+			// Ensure tracer provider shutdown on exit
+			defer func() {
+				// try to flush spans with timeout
+				ctxTo, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := shutdown(ctxTo); err != nil {
+					logger.Warn("Tracing shutdown error", zap.Error(err))
+				}
+			}()
+			logger.Info("Tracing enabled",
+				zap.String("endpoint", cfg.Tracing.Endpoint),
+				zap.String("protocol", cfg.Tracing.Protocol),
+			)
+		}
+	}
+
+	// Create server instance with tracing enabled from the start
+	server, err := core.NewServer(
+		logger,
+		cfg.Port,
+		store,
+		sessionStore,
+		a,
+		core.WithForwardConfig(cfg.Forward),
+		core.WithToolAccessConfig(cfg.ToolAccess),
+		core.WithTraceCapture(cfg.Tracing.Capture),
+		core.WithTracing(tracingServiceName), // Register OTel middleware early
+	)
 	if err != nil {
 		logger.Fatal("Failed to create server", zap.Error(err))
 	}
+
+	server.EnableMetrics(cfg.Metrics)
 
 	err = server.RegisterRoutes(ctx)
 	if err != nil {

@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/amoylab/unla/internal/common/config"
-
+	"github.com/amoylab/unla/pkg/metrics"
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
@@ -27,6 +29,12 @@ func (s *Server) loggerMiddleware() gin.HandlerFunc {
 			zap.String("remote_addr", c.Request.RemoteAddr),
 			zap.String("user_agent", c.Request.UserAgent()),
 		)
+
+		// Extract trace ID from OpenTelemetry context and inject into logger
+		span := trace.SpanFromContext(c.Request.Context())
+		if span.SpanContext().IsValid() {
+			logger = logger.With(zap.String("trace_id", span.SpanContext().TraceID().String()))
+		}
 
 		// Use Debug level to record more detailed request information
 		if s.logger.Core().Enabled(zap.DebugLevel) {
@@ -171,4 +179,42 @@ func (s *Server) corsMiddleware(cors *config.CORSConfig) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// EnableTracing attaches OpenTelemetry gin middleware using the given service name.
+func (s *Server) EnableTracing(serviceName string) {
+	if s == nil || s.router == nil {
+		return
+	}
+	s.router.Use(otelgin.Middleware(serviceName,
+		otelgin.WithFilter(func(r *http.Request) bool {
+			if r == nil || r.URL == nil {
+				return true
+			}
+			// Skip tracing for health check endpoint
+			if r.URL.Path == "/health_check" {
+				return false
+			}
+			// Skip tracing for metrics endpoint (dynamic path)
+			if s.metricsPath != "" && r.URL.Path == s.metricsPath {
+				return false
+			}
+			return true
+		}),
+	))
+}
+
+func (s *Server) EnableMetrics(cfg config.MetricsConfig) {
+	// If metrics are not enabled, skip configuration
+	if !cfg.Enabled {
+		return
+	}
+	m := metrics.New(cfg)
+	s.metrics = m
+	s.metricsPath = cfg.Path
+	s.logger.Info("metrics enabled", zap.String("path", cfg.Path))
+	// Register metrics middleware
+	s.router.Use(m.Middleware())
+	// Register metrics handler
+	s.router.GET(cfg.Path, gin.WrapH(m.Handler()))
 }

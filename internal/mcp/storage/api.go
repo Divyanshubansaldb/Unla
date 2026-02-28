@@ -24,23 +24,25 @@ type APIStore struct {
 	logger *zap.Logger
 	url    string
 	// read config from response(json body) using gjson
-	configJSONPath string
-	timeout        time.Duration
+	configJSONPath      string
+	ignoreInvalidConfig bool
+	timeout             time.Duration
 }
 
 var _ Store = (*APIStore)(nil)
 
 // NewAPIStore creates a new api-based store
-func NewAPIStore(logger *zap.Logger, url string, configJSONPath string, timeout time.Duration) (*APIStore, error) {
+func NewAPIStore(logger *zap.Logger, url string, configJSONPath string, timeout time.Duration, ignoreInvalidConfig bool) (*APIStore, error) {
 	logger = logger.Named("mcp.store")
 
 	logger.Info("Using configuration url", zap.String("path", url))
 
 	return &APIStore{
-		logger:         logger,
-		url:            url,
-		configJSONPath: configJSONPath,
-		timeout:        timeout,
+		logger:              logger,
+		url:                 url,
+		configJSONPath:      configJSONPath,
+		timeout:             timeout,
+		ignoreInvalidConfig: ignoreInvalidConfig,
 	}, nil
 }
 
@@ -70,10 +72,45 @@ func (s *APIStore) List(_ context.Context, _ ...bool) ([]*config.MCPConfig, erro
 	if err != nil {
 		return nil, err
 	}
-	var configs []*config.MCPConfig
-	err = json.Unmarshal([]byte(jsonStr), &configs)
-	if err != nil {
-		return nil, err
+
+	//var configs []*config.MCPConfig
+	//err = json.Unmarshal([]byte(jsonStr), &configs)
+	//if err != nil {
+	//	return nil, err
+	//}
+
+	// Unmarshal items individually (instead of the whole array) to precisely identify the failing configuration (index/name/tenant).
+	var items []json.RawMessage
+	if err := json.Unmarshal([]byte(jsonStr), &items); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal MCP configuration array: %w", err)
+	}
+
+	configs := make([]*config.MCPConfig, 0, len(items))
+	for i, raw := range items {
+		var cfg config.MCPConfig
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			var meta struct {
+				Name   string `json:"name"`
+				Tenant string `json:"tenant"`
+			}
+			_ = json.Unmarshal(raw, &meta)
+			if !s.ignoreInvalidConfig {
+				return nil, fmt.Errorf("failed to unmarshal MCP configuration '%s' (tenant: '%s'): %w", meta.Name, meta.Tenant, err)
+			}
+			if meta.Name != "" || meta.Tenant != "" {
+				s.logger.Warn("failed to unmarshal MCP configuration, skipping",
+					zap.String("name", meta.Name),
+					zap.String("tenant", meta.Tenant),
+					zap.Int("index", i),
+					zap.Error(err))
+			} else {
+				s.logger.Warn("failed to unmarshal MCP configuration, skipping",
+					zap.Int("index", i),
+					zap.Error(err))
+			}
+			continue // Skip failed configuration
+		}
+		configs = append(configs, &cfg)
 	}
 	return configs, nil
 }

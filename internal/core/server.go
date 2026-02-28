@@ -17,7 +17,9 @@ import (
 	"github.com/amoylab/unla/internal/mcp/session"
 	"github.com/amoylab/unla/internal/mcp/storage"
 	"github.com/amoylab/unla/pkg/mcp"
+	apptrace "github.com/amoylab/unla/pkg/trace"
 
+	"github.com/amoylab/unla/pkg/metrics"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -27,10 +29,10 @@ func parseHeaderList(headerList string, caseInsensitive bool) []string {
 	if headerList == "" {
 		return []string{}
 	}
-	
+
 	headers := strings.Split(headerList, ",")
 	result := make([]string, 0, len(headers))
-	
+
 	for _, header := range headers {
 		header = strings.TrimSpace(header)
 		if header != "" {
@@ -40,7 +42,7 @@ func parseHeaderList(headerList string, caseInsensitive bool) []string {
 			result = append(result, header)
 		}
 	}
-	
+
 	return result
 }
 
@@ -59,10 +61,17 @@ type (
 		// shutdownCh is used to signal shutdown to all SSE connections
 		shutdownCh chan struct{}
 		// toolRespHandler is a chain of response handlers
-		toolRespHandler ResponseHandler
-		lastUpdateTime  time.Time
-		auth            auth.Auth
-		forwardConfig   config.ForwardConfig
+		toolRespHandler    ResponseHandler
+		lastUpdateTime     time.Time
+		auth               auth.Auth
+		forwardConfig      config.ForwardConfig
+		traceCapture       apptrace.CaptureConfig
+		tracingService     string // OTel service name for tracing
+		metrics            *metrics.Metrics
+		metricsPath        string
+		toolAccess         config.ToolAccessConfig
+		internalNetACL     internalNetworkAllowlist
+		internalNetEnabled bool
 		// Pre-parsed header lists for efficient lookup
 		ignoreHeaders   []string
 		allowHeaders    []string
@@ -70,8 +79,32 @@ type (
 	}
 )
 
-// NewServer creates a new MCP server
-func NewServer(logger *zap.Logger, port int, store storage.Store, sessionStore session.Store, a auth.Auth, forwardConfig config.ForwardConfig) (*Server, error) {
+// ServerOption allows configuring optional server features without breaking callers.
+type ServerOption func(*Server)
+
+// WithTraceCapture sets the trace capture configuration.
+func WithTraceCapture(c apptrace.CaptureConfig) ServerOption {
+	return func(s *Server) { s.traceCapture = c }
+}
+
+// WithForwardConfig sets the forward proxy configuration.
+func WithForwardConfig(cfg config.ForwardConfig) ServerOption {
+	return func(s *Server) { s.applyForwardConfig(cfg) }
+}
+
+// WithToolAccessConfig sets the tool access policy configuration.
+func WithToolAccessConfig(cfg config.ToolAccessConfig) ServerOption {
+	return func(s *Server) { s.applyToolAccessConfig(cfg) }
+}
+
+// WithTracing sets the tracing service name for OpenTelemetry.
+func WithTracing(serviceName string) ServerOption {
+	return func(s *Server) { s.tracingService = serviceName }
+}
+
+// NewServer creates a new MCP server. Required params are explicit; optional
+// features are configured via ServerOption (e.g., tracing, forward config).
+func NewServer(logger *zap.Logger, port int, store storage.Store, sessionStore session.Store, a auth.Auth, opts ...ServerOption) (*Server, error) {
 	s := &Server{
 		logger:          logger,
 		port:            port,
@@ -82,14 +115,13 @@ func NewServer(logger *zap.Logger, port int, store storage.Store, sessionStore s
 		shutdownCh:      make(chan struct{}),
 		toolRespHandler: CreateResponseHandlerChain(),
 		auth:            a,
-		forwardConfig:   forwardConfig,
-		caseInsensitive: forwardConfig.Header.CaseInsensitive,
 	}
-	
-	// Pre-parse header lists for efficient runtime lookup (only if forward is enabled)
-	if forwardConfig.Enabled {
-		s.ignoreHeaders = parseHeaderList(forwardConfig.Header.IgnoreHeaders, forwardConfig.Header.CaseInsensitive)
-		s.allowHeaders = parseHeaderList(forwardConfig.Header.AllowHeaders, forwardConfig.Header.CaseInsensitive)
+
+	// Apply options
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
 	}
 
 	// Load HTML templates
@@ -97,9 +129,50 @@ func NewServer(logger *zap.Logger, port int, store storage.Store, sessionStore s
 	// Serve static files
 	s.router.Static("/static", "assets/static")
 
+	// Register OTel middleware BEFORE logger middleware
+	// so that trace context is available when logger middleware runs
+	if s.tracingService != "" {
+		s.EnableTracing(s.tracingService)
+	}
+
 	s.router.Use(s.loggerMiddleware())
 	s.router.Use(s.recoveryMiddleware())
 	return s, nil
+}
+
+// getLogger retrieves the context-aware logger from Gin context, falls back to server logger
+func (s *Server) getLogger(c *gin.Context) *zap.Logger {
+	if logger, exists := c.Get("logger"); exists {
+		if zapLogger, ok := logger.(*zap.Logger); ok {
+			return zapLogger
+		}
+	}
+	return s.logger
+}
+
+// applyForwardConfig sets forward config and recomputes derived fields.
+func (s *Server) applyForwardConfig(cfg config.ForwardConfig) {
+	s.forwardConfig = cfg
+	s.caseInsensitive = cfg.Header.CaseInsensitive
+	if cfg.Enabled {
+		s.ignoreHeaders = parseHeaderList(cfg.Header.IgnoreHeaders, cfg.Header.CaseInsensitive)
+		s.allowHeaders = parseHeaderList(cfg.Header.AllowHeaders, cfg.Header.CaseInsensitive)
+	} else {
+		s.ignoreHeaders = nil
+		s.allowHeaders = nil
+	}
+}
+
+// applyToolAccessConfig sets tool access config and parses internal allowlists.
+func (s *Server) applyToolAccessConfig(cfg config.ToolAccessConfig) {
+	s.toolAccess = cfg
+	s.internalNetEnabled = cfg.InternalNetwork.Enabled == nil || *cfg.InternalNetwork.Enabled
+	allowlist, invalid := parseInternalNetworkAllowlist(cfg.InternalNetwork.Allowlist)
+	if len(invalid) > 0 {
+		s.logger.Warn("invalid internal network allowlist entries",
+			zap.Strings("entries", invalid))
+	}
+	s.internalNetACL = allowlist
 }
 
 // RegisterRoutes registers routes with the given router for MCP servers

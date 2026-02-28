@@ -72,24 +72,33 @@ const RUNTIME_CONFIG = (window.RUNTIME_CONFIG || {}) as Record<string, unknown>;
 
 // Helper to get the gateway base URL
 const getGatewayBaseUrl = () => {
-  let base = RUNTIME_CONFIG.VITE_MCP_GATEWAY_BASE_URL as string;
-  if (!base) return '';
+  let base = (RUNTIME_CONFIG.VITE_MCP_GATEWAY_BASE_URL as string) || '';
+  
   // Remove trailing slash if present
   base = base.replace(/\/+$/, '');
+  
   if (base.startsWith('http')) {
     return base;
   }
+  
   // Remove trailing slash from window.location.origin just in case
   const origin = window.location.origin.replace(/\/+$/, '');
-  // Ensure base starts with a slash
-  if (!base.startsWith('/')) {
+  
+  // Ensure base starts with a slash if it's not empty
+  if (base && !base.startsWith('/')) {
     base = '/' + base;
   }
+  
   return `${origin}${base}`;
 };
 
 // Helper to get direct gateway base URL using modifier
 const getDirectGatewayBaseUrl = () => {
+  const explicitBaseUrl = window.RUNTIME_CONFIG?.VITE_GATEWAY_SERVICE_BASE_URL as string;
+  if (explicitBaseUrl) {
+    return explicitBaseUrl.replace(/\/+$/, '');
+  }
+
   let modifier = (window.RUNTIME_CONFIG?.VITE_DIRECT_MCP_GATEWAY_MODIFIER as string) || ':5235';
   const origin = window.location.origin.replace(/\/+$/, '');
 
@@ -118,7 +127,9 @@ export function GatewayManager() {
   const [isLoading, setIsLoading] = React.useState(true);
   const [tenants, setTenants] = React.useState<Tenant[]>([]);
   const [selectedTenant, setSelectedTenant] = React.useState<string | undefined>(undefined);
-  const [viewMode, setViewMode] = React.useState<string>('table');
+  const [viewMode, setViewMode] = React.useState<string>(() => {
+    return localStorage.getItem('gateway_view_mode') || 'table';
+  });
   const [isDark, setIsDark] = React.useState(() => {
     return document.documentElement.classList.contains('dark');
   });
@@ -182,6 +193,8 @@ export function GatewayManager() {
 
     fetchMCPServers();
   }, [t, selectedTenant, tenants]);
+
+  // 延迟这个 useEffect，放到 fetchAllCapabilitiesStats 定义之后
 
   // Get user's authorized tenants
   React.useEffect(() => {
@@ -479,6 +492,8 @@ export function GatewayManager() {
     }, 1000);
   };
 
+
+
   return (
     <div className="container mx-auto p-4 pb-10 h-[calc(100vh-5rem)] flex flex-col overflow-y-scroll scrollbar-hide">
       <div className="flex justify-between items-center mb-4">
@@ -544,7 +559,11 @@ export function GatewayManager() {
         <Tabs
           aria-label={t('gateway.view_mode')}
           selectedKey={viewMode}
-          onSelectionChange={(key) => setViewMode(key as string)}
+          onSelectionChange={(key) => {
+            const mode = key as string;
+            setViewMode(mode);
+            localStorage.setItem('gateway_view_mode', mode);
+          }}
           size="sm"
           classNames={{
             tabList: "bg-default-100 p-1 rounded-lg"
@@ -608,6 +627,19 @@ export function GatewayManager() {
                         color="primary"
                         variant="light"
                         size="sm"
+                        onPress={() => {
+                          navigate(`/gateway/capabilities/${encodeURIComponent(server.tenant || 'default')}/${encodeURIComponent(server.name)}`);
+                        }}
+                        aria-label={t('capabilities.view_capabilities')}
+                        isDisabled={isOpen || isCreateOpen || isImportOpen}
+                      >
+                        <LocalIcon icon="lucide:brain" className="text-lg" />
+                      </Button>
+                      <Button
+                        isIconOnly
+                        color="primary"
+                        variant="light"
+                        size="sm"
                         onPress={() => handleEdit(server)}
                         aria-label={t('gateway.edit')}
                         isDisabled={isOpen || isCreateOpen || isImportOpen}
@@ -653,6 +685,7 @@ export function GatewayManager() {
 
                   {server && (
                     <div className="space-y-3">
+                      
                       {(server.servers || []).map((serverConfig) => {
                         const sc = serverConfig as ServerConfig;
                         return (
@@ -1108,6 +1141,18 @@ export function GatewayManager() {
                         color="primary"
                         variant="light"
                         size="sm"
+                        onPress={() => {
+                          navigate(`/gateway/capabilities/${encodeURIComponent(server.tenant || 'default')}/${encodeURIComponent(server.name)}`);
+                        }}
+                        aria-label={t('capabilities.view_capabilities')}
+                      >
+                        <LocalIcon icon="lucide:brain" className="text-lg" />
+                      </Button>
+                      <Button
+                        isIconOnly
+                        color="primary"
+                        variant="light"
+                        size="sm"
                         onPress={() => handleEdit(server)}
                         aria-label={t('gateway.edit')}
                       >
@@ -1498,6 +1543,7 @@ export function GatewayManager() {
           )}
         </ModalContent>
       </Modal>
+
     </div>
   );
 }

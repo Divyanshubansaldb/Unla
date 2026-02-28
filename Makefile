@@ -123,7 +123,7 @@ ali: build
 	docker push $(ALI_REGISTRY)/$(PROJECT_NAME)/allinone:$(IMAGE_TAG)
 
 # Test targets
-.PHONY: test test-coverage test-race
+.PHONY: test test-coverage test-race template-tester
 
 # Run all tests
 test:
@@ -133,10 +133,23 @@ test:
 test-coverage:
 	go test $(TEST_FLAGS) -coverprofile=$(COVERAGE_FILE) $(TEST_PACKAGES)
 	go tool cover -html=$(COVERAGE_FILE) -o $(COVERAGE_HTML)
+	go tool cover -func=$(COVERAGE_FILE)
 
 # Run tests with race detection
 test-race:
 	go test $(TEST_FLAGS) -race $(TEST_PACKAGES)
+
+# Build template tester CLI tool
+template-tester:
+	go build -o bin/template-tester cmd/template-tester/main.go
+
+# Build template tester docker image
+.PHONY: docker-template-tester
+docker-template-tester:
+	docker build --platform=linux/amd64 \
+		-t $(PROJECT_NAME)-template-tester:$(IMAGE_TAG) \
+		-f deploy/docker/template-tester/Dockerfile .
+	docker tag $(PROJECT_NAME)-template-tester:$(IMAGE_TAG) $(PROJECT_NAME)-template-tester:latest
 
 # Clean up test artifacts
 clean-test:
@@ -154,4 +167,12 @@ clean:
 	docker rmi $(PROJECT_NAME)-allinone:$(IMAGE_TAG) || true
 	docker rmi $(DOCKER_REGISTRY)/$(PROJECT_NAME)/allinone:$(IMAGE_TAG) || true
 	docker rmi $(GHCR_REGISTRY)/$(PROJECT_NAME)/allinone:$(IMAGE_TAG) || true
-	docker rmi $(ALI_REGISTRY)/$(PROJECT_NAME)/allinone:$(IMAGE_TAG) || true 
+	docker rmi $(ALI_REGISTRY)/$(PROJECT_NAME)/allinone:$(IMAGE_TAG) || true
+
+format:
+	gofmt -w .
+	goimports -w .
+
+fmt: format
+
+lint: format

@@ -10,6 +10,7 @@
 [![Discord](https://img.shields.io/badge/Discord-加入讨论-5865F2?logo=discord&logoColor=white)](https://discord.gg/udf69cT9TY)
 [![Go Report Card](https://goreportcard.com/badge/github.com/amoylab/unla)](https://goreportcard.com/report/github.com/amoylab/unla)
 [![Snyk Security](https://img.shields.io/badge/Snyk-Secure-blueviolet?logo=snyk)](https://snyk.io/test/github/mcp-ecosystem/mcp-gateway)
+<a href="https://llmapis.com?source=https%3A%2F%2Fgithub.com%2FAmoyLab%2FUnla" target="_blank"><img src="https://llmapis.com/api/badge/AmoyLab/Unla" alt="LLMAPIS" width="20" /></a>
 
 ---
 
@@ -178,4 +179,3 @@ docker run -d \
 ## 📈 Star 历史
 
 [![Star History Chart](https://api.star-history.com/svg?repos=AmoyLab/Unla&type=Date)](https://star-history.com/#AmoyLab/Unla&Date)
-

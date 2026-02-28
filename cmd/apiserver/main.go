@@ -27,7 +27,9 @@ import (
 )
 
 var (
-	configPath string
+	configPath         string
+	mcpRefreshInterval time.Duration
+	mcpCacheTTL        time.Duration
 
 	versionCmd = &cobra.Command{
 		Use:   "version",
@@ -49,6 +51,9 @@ var (
 
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&configPath, "conf", "c", cnst.ApiServerYaml, "path to configuration file, like /etc/unla/apiserver.yaml")
+	// CLI 覆盖：能力刷新周期与缓存 TTL
+	rootCmd.PersistentFlags().DurationVar(&mcpRefreshInterval, "mcp-refresh-interval", 0, "interval for background MCP capabilities refresh (e.g. 120s, 2m)")
+	rootCmd.PersistentFlags().DurationVar(&mcpCacheTTL, "mcp-cache-ttl", 0, "TTL for cached MCP capabilities (e.g. 5m, 10m)")
 	rootCmd.AddCommand(versionCmd)
 }
 
@@ -134,7 +139,7 @@ func initSuperAdmin(ctx context.Context, db database.Database, cfg *config.APISe
 }
 
 // initRouter initializes the HTTP router and handlers
-func initRouter(db database.Database, store storage.Store, ntf notifier.Notifier, cfg *config.APIServerConfig, logger *zap.Logger) *gin.Engine {
+func initRouter(ctx context.Context, db database.Database, store storage.Store, ntf notifier.Notifier, cfg *config.APIServerConfig, logger *zap.Logger) *gin.Engine {
 	r := gin.Default()
 
 	// Convert APIServerConfig to MCPGatewayConfig
@@ -146,23 +151,26 @@ func initRouter(db database.Database, store storage.Store, ntf notifier.Notifier
 	}
 
 	// Initialize auth services
-	jwtService := jwt.NewService(jwt.Config{
+	jwtService, err := jwt.NewService(jwt.Config{
 		SecretKey: cfg.JWT.SecretKey,
 		Duration:  cfg.JWT.Duration,
 	})
-	
+	if err != nil {
+		logger.Fatal("Failed to initialize JWT service", zap.Error(err))
+	}
+
 	// Initialize OAuth auth service
 	authService, err := auth.NewAuth(logger, cfg.Auth)
 	if err != nil {
 		logger.Fatal("Failed to initialize auth service", zap.Error(err))
 	}
-	
+
 	authH := apiserverHandler.NewHandler(db, jwtService, mcpCfg, logger)
 	oauthH := apiserverHandler.NewOAuthHandler(db, jwtService, authService, logger)
 
 	authG := r.Group("/api/auth")
 	authG.POST("/login", authH.Login)
-	
+
 	// OAuth routes
 	oauthG := authG.Group("/oauth")
 	{
@@ -174,13 +182,19 @@ func initRouter(db database.Database, store storage.Store, ntf notifier.Notifier
 	}
 
 	// Protected routes
+	var mcpHandler *apiserverHandler.MCP
 	protected := r.Group("/api")
 	protected.Use(middleware.JWTAuthMiddleware(jwtService))
 	{
-		chatHandler := apiserverHandler.NewChat(db, logger)
-		mcpHandler := apiserverHandler.NewMCP(db, store, ntf, logger)
+		mcpHandler = apiserverHandler.NewMCP(
+			db,
+			store,
+			ntf,
+			logger,
+			cfg.MCP.CapabilitiesRefreshInterval,
+			cfg.MCP.CapabilitiesCacheTTL,
+		)
 		openapiHandler := apiserverHandler.NewOpenAPI(db, store, ntf, logger)
-		systemPromptHandler := apiserverHandler.NewSystemPrompt(db, logger)
 
 		// Auth routes
 		protected.POST("/auth/change-password", authH.ChangePassword)
@@ -224,23 +238,14 @@ func initRouter(db database.Database, store storage.Store, ntf notifier.Notifier
 			mcpGroup.PUT("/configs", mcpHandler.HandleMCPServerUpdate)
 			mcpGroup.DELETE("/configs/:tenant/:name", mcpHandler.HandleMCPServerDelete)
 			mcpGroup.POST("/configs/sync", mcpHandler.HandleMCPServerSync)
+
+			// Capabilities endpoint
+			mcpGroup.GET("/capabilities/:tenant/:name", mcpHandler.HandleGetCapabilities)
+
 		}
 
 		// OpenAPI routes
 		protected.POST("/openapi/import", openapiHandler.HandleImport)
-
-		protected.GET("/chat/sessions", chatHandler.HandleGetChatSessions)
-		protected.GET("/chat/sessions/:sessionId/messages", chatHandler.HandleGetChatMessages)
-		protected.DELETE("/chat/sessions/:sessionId", chatHandler.HandleDeleteChatSession)
-		protected.PUT("/chat/sessions/:sessionId/title", chatHandler.HandleUpdateChatSessionTitle)
-		protected.POST("/chat/messages", chatHandler.HandleSaveChatMessage)
-
-		// System prompt routes
-		protected.GET("/chat/systemprompt", systemPromptHandler.GetSystemPrompt)
-		protected.PUT("/chat/systemprompt", systemPromptHandler.SaveSystemPrompt)
-
-		// Default LLM provider endpoint
-		protected.GET("/defaultllmprovider", chatHandler.HandleDefaultLLMProviders)
 	}
 
 	// Public runtime config endpoint for frontend
@@ -248,6 +253,9 @@ func initRouter(db database.Database, store storage.Store, ntf notifier.Notifier
 	r.GET("/api/runtime-config", runtimeConfigHandler.HandleRuntimeConfig)
 
 	r.Static("/web", "./web")
+
+	// Start background MCP capabilities refresh (interval from config)
+	mcpHandler.StartCapabilitiesSync(ctx)
 	return r
 }
 
@@ -283,6 +291,14 @@ func run() {
 	// Load configuration first
 	cfg := initConfig()
 
+	// 覆盖配置：若 CLI 提供了有效值则覆盖 YAML 配置
+	if mcpRefreshInterval > 0 {
+		cfg.MCP.CapabilitiesRefreshInterval = mcpRefreshInterval
+	}
+	if mcpCacheTTL > 0 {
+		cfg.MCP.CapabilitiesCacheTTL = mcpCacheTTL
+	}
+
 	// Initialize logger with configuration
 	logger := initLogger(cfg)
 	defer logger.Sync()
@@ -305,7 +321,7 @@ func run() {
 	store := initStore(logger, &cfg.Storage)
 
 	// Initialize router and start server
-	router := initRouter(db, store, ntf, cfg, logger)
+	router := initRouter(ctx, db, store, ntf, cfg, logger)
 	startServer(logger, router)
 }
 

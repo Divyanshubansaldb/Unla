@@ -61,7 +61,10 @@ notifier:
 
   # Redis configuration (only used when type is redis)
   redis:
+    cluster_type: "${APISERVER_NOTIFIER_REDIS_CLUSTER_TYPE:single}"
     addr: "${APISERVER_NOTIFIER_REDIS_ADDR:localhost:6379}"
+    master_name: "${APISERVER_NOTIFIER_REDIS_MASTER_NAME:}"
+    username: "${APISERVER_NOTIFIER_REDIS_USERNAME:}"
     password: "${APISERVER_NOTIFIER_REDIS_PASSWORD:UseStrongPasswordIsAGoodPractice}"
     db: ${APISERVER_NOTIFIER_REDIS_DB:0}
     topic: "${APISERVER_NOTIFIER_REDIS_TOPIC:mcp-gateway:reload}"
@@ -77,6 +80,7 @@ web:
   ws_base_url: "${VITE_WS_BASE_URL:/api/ws}"
   mcp_gateway_base_url: "${VITE_MCP_GATEWAY_BASE_URL:/gateway}"
   direct_mcp_gateway_modifier: "${VITE_DIRECT_MCP_GATEWAY_MODIFIER::5235}"
+  gateway_service_base_url: "${VITE_GATEWAY_SERVICE_BASE_URL:http://localhost:5235}"
   base_url: "${VITE_BASE_URL:/}"
   debug_mode: ${DEBUG_MODE:false}
   enable_experimental: ${ENABLE_EXPERIMENTAL:false}
@@ -95,3 +99,12 @@ auth:
     client_id: "${GITHUB_OAUTH_CLIENT_ID:}"
     client_secret: "${GITHUB_OAUTH_CLIENT_SECRET:}"
     redirect_uri: "${GITHUB_OAUTH_REDIRECT_URI:http://localhost:5234/api/auth/oauth/github/callback}"
+
+# MCP runtime (capabilities sync/cache) configuration
+mcp:
+  # Background refresh interval for fetching capabilities from MCP servers
+  # Examples: 120s, 2m, 5m
+  capabilities_refresh_interval: "${APISERVER_MCP_CAPABILITIES_REFRESH_INTERVAL:120s}"
+
+  # Cache TTL for capabilities entries (should be >= refresh interval)
+  capabilities_cache_ttl: "${APISERVER_MCP_CAPABILITIES_CACHE_TTL:5m}"

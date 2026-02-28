@@ -3,10 +3,11 @@ package config
 import (
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/amoylab/unla/pkg/helper"
-
+	"github.com/amoylab/unla/pkg/trace"
 	"github.com/joho/godotenv"
 	"gopkg.in/yaml.v3"
 )
@@ -25,10 +26,10 @@ type (
 			KeyForHeader string `yaml:"key_for_header"`
 		} `yaml:"mcp_arg"`
 		Header struct {
-			AllowHeaders      string `yaml:"allow_headers"`
-			IgnoreHeaders     string `yaml:"ignore_headers"`
-			CaseInsensitive   bool   `yaml:"case_insensitive"`
-			OverrideExisting  bool   `yaml:"override_existing"`
+			AllowHeaders     string `yaml:"allow_headers"`
+			IgnoreHeaders    string `yaml:"ignore_headers"`
+			CaseInsensitive  bool   `yaml:"case_insensitive"`
+			OverrideExisting bool   `yaml:"override_existing"`
 		} `yaml:"header"`
 	}
 
@@ -39,13 +40,36 @@ type (
 		ReloadInterval time.Duration    `yaml:"reload_interval"`
 		ReloadSwitch   bool             `yaml:"reload_switch"`
 		Forward        ForwardConfig    `yaml:"forward"`
+		ToolAccess     ToolAccessConfig `yaml:"tool_access"`
 		PID            string           `yaml:"pid"`
 		SuperAdmin     SuperAdminConfig `yaml:"super_admin"`
 		Logger         LoggerConfig     `yaml:"logger"`
+		Tracing        trace.Config     `yaml:"tracing"`
 		Storage        StorageConfig    `yaml:"storage"`
 		Notifier       NotifierConfig   `yaml:"notifier"`
 		Session        SessionConfig    `yaml:"session"`
 		Auth           AuthConfig       `yaml:"auth"`
+		Metrics        MetricsConfig    `yaml:"metrics"`
+	}
+
+	// MetricsConfig controls Prometheus metrics exposure
+	MetricsConfig struct {
+		Enabled   bool      `yaml:"enabled"`
+		Path      string    `yaml:"path"`
+		Namespace string    `yaml:"namespace"`
+		Buckets   []float64 `yaml:"buckets"`
+	}
+
+	// ToolAccessConfig controls access policies for tool endpoints.
+	ToolAccessConfig struct {
+		InternalNetwork InternalNetworkAccessConfig `yaml:"internal_network"`
+	}
+
+	// InternalNetworkAccessConfig defines allowlist for internal network targets.
+	InternalNetworkAccessConfig struct {
+		// Enabled controls whether internal network access validation is enabled.
+		Enabled   *bool      `yaml:"enabled"`
+		Allowlist StringList `yaml:"allowlist"`
 	}
 
 	// SessionConfig represents the session storage configuration
@@ -85,8 +109,8 @@ type (
 
 	// AuthConfig defines the authentication configuration
 	AuthConfig struct {
-		OAuth2 *OAuth2Config `yaml:"oauth2"`
-		CORS   *CORSConfig   `yaml:"cors,omitempty"`
+		OAuth2 *OAuth2Config      `yaml:"oauth2"`
+		CORS   *CORSConfig        `yaml:"cors,omitempty"`
 		Google *GoogleOAuthConfig `yaml:"google,omitempty"`
 		GitHub *GitHubOAuthConfig `yaml:"github,omitempty"`
 	}
@@ -126,6 +150,37 @@ type Type interface {
 	MCPGatewayConfig | APIServerConfig
 }
 
+// StringList supports YAML sequences and comma-separated strings.
+type StringList []string
+
+func (s *StringList) UnmarshalYAML(value *yaml.Node) error {
+	var raw string
+	if err := value.Decode(&raw); err == nil {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			*s = []string{}
+			return nil
+		}
+		parts := strings.Split(raw, ",")
+		out := make([]string, 0, len(parts))
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				out = append(out, part)
+			}
+		}
+		*s = out
+		return nil
+	}
+
+	var items []string
+	if err := value.Decode(&items); err != nil {
+		return err
+	}
+	*s = items
+	return nil
+}
+
 // LoadConfig loads configuration from a YAML file with environment variable support
 func LoadConfig[T Type](filename string) (*T, string, error) {
 	// Load .env file if exists
@@ -148,6 +203,29 @@ func LoadConfig[T Type](filename string) (*T, string, error) {
 	if mcpCfg, ok := any(&cfg).(*MCPGatewayConfig); ok {
 		if mcpCfg.ReloadInterval <= time.Second {
 			mcpCfg.ReloadInterval = 600 * time.Second
+		}
+		// Metrics defaults
+		if mcpCfg.Metrics.Enabled {
+			if mcpCfg.Metrics.Path == "" {
+				mcpCfg.Metrics.Path = "/metrics"
+			}
+			if mcpCfg.Metrics.Namespace == "" {
+				mcpCfg.Metrics.Namespace = "mcp_gateway"
+			}
+			if len(mcpCfg.Metrics.Buckets) == 0 {
+				mcpCfg.Metrics.Buckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10}
+			}
+		}
+
+	}
+
+	// Set defaults for apiserver MCP runtime if missing
+	if apiCfg, ok := any(&cfg).(*APIServerConfig); ok {
+		if apiCfg.MCP.CapabilitiesRefreshInterval <= 0 {
+			apiCfg.MCP.CapabilitiesRefreshInterval = 120 * time.Second
+		}
+		if apiCfg.MCP.CapabilitiesCacheTTL <= 0 {
+			apiCfg.MCP.CapabilitiesCacheTTL = 5 * time.Minute
 		}
 	}
 

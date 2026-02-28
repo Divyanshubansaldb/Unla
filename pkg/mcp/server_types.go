@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"time"
 )
 
 type (
@@ -58,6 +59,9 @@ type (
 		InputSchema ToolInputSchema `json:"inputSchema"`
 		// Annotations for the tool
 		Annotations *ToolAnnotations `json:"annotations,omitempty"`
+		// Meta information for the tool
+		// https://github.com/modelcontextprotocol/python-sdk/blob/main/src/mcp/types.py
+		Meta map[string]any `json:"_meta,omitempty"`
 	}
 
 	// https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2025-03-26/schema.json
@@ -265,6 +269,52 @@ type (
 		Type string `json:"type" yaml:"type"`
 		Text string `json:"text" yaml:"text"`
 	}
+
+	// CapabilitiesInfo represents the capabilities information for an MCP server
+	CapabilitiesInfo struct {
+		Tools             []MCPTool             `json:"tools"`
+		Prompts           []MCPPrompt           `json:"prompts"`
+		Resources         []MCPResource         `json:"resources"`
+		ResourceTemplates []MCPResourceTemplate `json:"resourceTemplates"`
+		LastSynced        time.Time             `json:"lastSynced"`
+		ServerInfo        ImplementationSchema  `json:"serverInfo"`
+	}
+
+	// MCPTool represents a tool in MCP capabilities
+	MCPTool struct {
+		Name        string           `json:"name"`
+		Description string           `json:"description"`
+		InputSchema ToolInputSchema  `json:"inputSchema"`
+		Annotations *ToolAnnotations `json:"annotations,omitempty"`
+		Enabled     bool             `json:"enabled"`
+		LastSynced  time.Time        `json:"lastSynced"`
+	}
+
+	// MCPPrompt represents a prompt in MCP capabilities
+	MCPPrompt struct {
+		Name        string                 `json:"name"`
+		Description string                 `json:"description"`
+		Arguments   []PromptArgumentSchema `json:"arguments"`
+		LastSynced  time.Time              `json:"lastSynced"`
+	}
+
+	// MCPResource represents a resource in MCP capabilities
+	MCPResource struct {
+		Uri         string    `json:"uri"`
+		Name        string    `json:"name"`
+		Description string    `json:"description"`
+		MimeType    string    `json:"mimeType"`
+		LastSynced  time.Time `json:"lastSynced"`
+	}
+
+	// MCPResourceTemplate represents a resource template in MCP capabilities
+	MCPResourceTemplate struct {
+		UriTemplate string    `json:"uriTemplate"`
+		Name        string    `json:"name"`
+		Description string    `json:"description"`
+		MimeType    string    `json:"mimeType"`
+		LastSynced  time.Time `json:"lastSynced"`
+	}
 )
 
 // NewInitializeRequest creates a new initialize request
@@ -341,6 +391,22 @@ func NewCallToolResultText(text string) *CallToolResult {
 	}
 }
 
+// NewCallToolResultTextWithError creates a new CallToolResult with text content and error flag
+// @param text the text content
+// @param isError indicates if the result is an error
+// @return *CallToolResult the CallToolResult object with the text content and error flag
+func NewCallToolResultTextWithError(text string, isError bool) *CallToolResult {
+	return &CallToolResult{
+		Content: []Content{
+			&TextContent{
+				Type: TextContentType,
+				Text: text,
+			},
+		},
+		IsError: isError,
+	}
+}
+
 // NewCallToolResultImage  creates a new CallToolResult with an image content
 // @param imageData the image data in base64 format
 // @param mimeType the MIME type of the image (e.g., "image/png", "image/jpeg")
@@ -365,7 +431,7 @@ func NewCallToolResultImage(imageData, mimeType string) *CallToolResult {
 func NewCallToolResultAudio(audioData, mimeType string) *CallToolResult {
 	return &CallToolResult{
 		Content: []Content{
-			&ImageContent{
+			&AudioContent{
 				Type:     AudioContentType,
 				Data:     audioData,
 				MimeType: mimeType,

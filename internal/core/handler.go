@@ -75,8 +75,8 @@ func (h *TextHandler) Handle(resp *http.Response, tool *config.ToolConfig, tmplC
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 	var rendered string
-	if tool.ResponseBody == "" {
-		rendered = ""
+	if tool == nil || tool.ResponseBody == "" {
+		rendered = string(respBody)
 	} else {
 		var respData map[string]any
 		if err := json.Unmarshal(respBody, &respData); err != nil {
@@ -92,7 +92,8 @@ func (h *TextHandler) Handle(resp *http.Response, tool *config.ToolConfig, tmplC
 			return nil, fmt.Errorf("failed to render response body template: %w", err)
 		}
 	}
-	return mcp.NewCallToolResultText(rendered), nil
+	isError := resp.StatusCode >= 400
+	return mcp.NewCallToolResultTextWithError(rendered, isError), nil
 }
 
 // ImageHandler is a handler for image responses

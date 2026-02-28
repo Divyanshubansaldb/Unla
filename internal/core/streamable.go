@@ -12,8 +12,11 @@ import (
 	"github.com/amoylab/unla/pkg/mcp"
 	"github.com/amoylab/unla/pkg/version"
 
+	apptrace "github.com/amoylab/unla/pkg/trace"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
@@ -42,6 +45,8 @@ func (s *Server) handleMCP(c *gin.Context) {
 
 // handleGet handles GET requests for SSE stream
 func (s *Server) handleGet(c *gin.Context) {
+	logger := s.getLogger(c)
+
 	// Check Accept header for text/event-stream
 	acceptHeader := c.GetHeader("Accept")
 	if !strings.Contains(acceptHeader, "text/event-stream") {
@@ -71,7 +76,7 @@ func (s *Server) handleGet(c *gin.Context) {
 			case "message":
 				_, err := fmt.Fprintf(c.Writer, "event: message\ndata: %s\n\n", event.Data)
 				if err != nil {
-					s.logger.Error("failed to send SSE message", zap.Error(err))
+					logger.Error("failed to send SSE message", zap.Error(err))
 				}
 			}
 			_, _ = fmt.Fprint(c.Writer, event)
@@ -178,6 +183,28 @@ func (s *Server) handleDelete(c *gin.Context) {
 }
 
 func (s *Server) handleMCPRequest(c *gin.Context, req mcp.JSONRPCRequest, conn session.Connection) {
+	logger := s.getLogger(c)
+
+	// Create a span per MCP method to group downstream work
+	scope := apptrace.Tracer(cnst.TraceCore).
+		Start(c.Request.Context(), cnst.SpanMCPMethodPrefix+req.Method, oteltrace.WithSpanKind(oteltrace.SpanKindInternal)).
+		WithAttrs(
+			attribute.String(cnst.AttrMCPSessionID, conn.Meta().ID),
+			attribute.String(cnst.AttrMCPPrefix, conn.Meta().Prefix),
+			attribute.String("mcp.method", req.Method),
+		)
+	ctx := scope.Ctx
+	defer scope.End()
+
+	// Ensure downstream operations see this span in the request context
+	c.Request = c.Request.WithContext(ctx)
+
+	reqStartTime := time.Now()
+	if s.metrics != nil {
+		s.metrics.McpReqStart(req.Method)
+		defer s.metrics.McpReqDone(req.Method, reqStartTime)
+	}
+
 	// Process the request based on its method
 	switch req.Method {
 	case mcp.Initialize:
@@ -195,6 +222,13 @@ func (s *Server) handleMCPRequest(c *gin.Context, req mcp.JSONRPCRequest, conn s
 				Tools: mcp.ToolsCapabilitySchema{
 					ListChanged: true,
 				},
+				Prompts: mcp.PromptsCapabilitySchema{
+					ListChanged: false,
+				},
+				Resources: mcp.ResourcesCapabilitySchema{
+					Subscribe:   false,
+					ListChanged: false,
+				},
 			},
 			ServerInfo: mcp.ImplementationSchema{
 				Name:    cnst.AppName,
@@ -206,7 +240,10 @@ func (s *Server) handleMCPRequest(c *gin.Context, req mcp.JSONRPCRequest, conn s
 	case mcp.NotificationInitialized:
 		c.Status(http.StatusAccepted)
 		return
-
+	case mcp.Ping:
+		// Handle ping request with an empty response
+		s.sendSuccessResponse(c, conn, req, struct{}{}, false)
+		return
 	case mcp.ToolsList:
 		protoType := s.state.GetProtoType(conn.Meta().Prefix)
 		if protoType == "" {
@@ -263,29 +300,85 @@ func (s *Server) handleMCPRequest(c *gin.Context, req mcp.JSONRPCRequest, conn s
 			result *mcp.CallToolResult
 			err    error
 		)
+
+		status := "success"
+
+		toolName := params.Name
+		if s.metrics != nil {
+			toolStartTime := time.Now()
+			s.metrics.ToolExecStart(toolName)
+			defer s.metrics.ToolExecDone(toolName, toolStartTime, &status)
+		}
+
 		switch protoType {
 		case cnst.BackendProtoHttp:
-			result = s.callHTTPTool(c, req, conn, params)
+			result = s.callHTTPTool(c, req, conn, params, false)
+			if result == nil {
+				// Error already handled by callHTTPTool
+				status = "error"
+				return
+			}
 		case cnst.BackendProtoStdio, cnst.BackendProtoSSE, cnst.BackendProtoStreamable:
 			transport := s.state.GetTransport(conn.Meta().Prefix)
 			if transport == nil {
 				errMsg := "Server configuration not found"
 				s.sendProtocolError(c, req.Id, errMsg, http.StatusNotFound, mcp.ErrorCodeMethodNotFound)
+				status = "error"
 				return
 			}
 
 			result, err = transport.CallTool(c.Request.Context(), params, mergeRequestInfo(conn.Meta().Request, c.Request))
 			if err != nil {
 				s.sendToolExecutionError(c, conn, req, err, true)
+				status = "error"
 				return
 			}
 
 		default:
 			s.sendProtocolError(c, req.Id, "Unsupported protocol type", http.StatusBadRequest, mcp.ErrorCodeInvalidParams)
+			status = "error"
 			return
 		}
 
 		s.sendSuccessResponse(c, conn, req, result, false)
+		return
+
+	case mcp.LoggingSetLevel:
+		// Minimal stub: accept requested level and return empty object
+		// Inspector may invoke this regardless of server support; avoid -32601
+		type params struct {
+			Level string `json:"level"`
+		}
+		var p params
+		// Ignore unmarshal errors; treat as best-effort no-op
+		_ = json.Unmarshal(req.Params, &p)
+		s.sendSuccessResponse(c, conn, req, struct{}{}, false)
+		return
+
+	case mcp.ResourcesList:
+		// Return an empty resources list by default
+		s.sendSuccessResponse(c, conn, req, struct {
+			Resources []struct{} `json:"resources"`
+		}{Resources: []struct{}{}}, false)
+		return
+
+	case mcp.ResourcesTemplatesList:
+		// Return an empty resourceTemplates list by default
+		s.sendSuccessResponse(c, conn, req, struct {
+			ResourceTemplates []struct{} `json:"resourceTemplates"`
+		}{ResourceTemplates: []struct{}{}}, false)
+		return
+
+	case mcp.ResourcesRead:
+		// Minimal stub: acknowledge read with empty contents to avoid -32601
+		type params struct {
+			URI string `json:"uri"`
+		}
+		var p params
+		_ = json.Unmarshal(req.Params, &p)
+		s.sendSuccessResponse(c, conn, req, struct {
+			Contents []struct{} `json:"contents"`
+		}{Contents: []struct{}{}}, false)
 		return
 
 	case mcp.PromptsList:
@@ -354,7 +447,7 @@ func (s *Server) handleMCPRequest(c *gin.Context, req mcp.JSONRPCRequest, conn s
 					break
 				}
 			}
-			s.logger.Info("PromptsGet-prompt found", zap.String("params.Name", params.Name), zap.String("promptname", prompt.Name))
+			logger.Info("PromptsGet-prompt found", zap.String("params.Name", params.Name), zap.String("promptname", prompt.Name))
 		case cnst.BackendProtoStdio, cnst.BackendProtoSSE, cnst.BackendProtoStreamable:
 			transport := s.state.GetTransport(conn.Meta().Prefix)
 			if transport == nil {

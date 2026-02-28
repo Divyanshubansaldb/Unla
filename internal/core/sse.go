@@ -17,10 +17,22 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	oteltrace "go.opentelemetry.io/otel/trace"
+
+	apptrace "github.com/amoylab/unla/pkg/trace"
 )
 
 // handleSSE handles SSE connections
 func (s *Server) handleSSE(c *gin.Context) {
+	logger := s.getLogger(c)
+
+	// Create a child span for the SSE connection lifecycle
+	scope := apptrace.Tracer(cnst.TraceCore).
+		Start(c.Request.Context(), cnst.SpanSSEConnect, oteltrace.WithSpanKind(oteltrace.SpanKindInternal))
+	ctx := scope.Ctx
+	defer scope.End()
+
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache, no-transform")
 	c.Writer.Header().Set("Connection", "keep-alive")
@@ -65,16 +77,24 @@ func (s *Server) handleSSE(c *gin.Context) {
 		Extra:     nil,
 	}
 
-	s.logger.Info("establishing SSE connection",
+	// Annotate span with session metadata
+	scope.WithAttrs(
+		attribute.String(cnst.AttrMCPSessionID, sessionID),
+		attribute.String(cnst.AttrMCPPrefix, prefix),
+		attribute.String(cnst.AttrClientAddr, c.Request.RemoteAddr),
+		attribute.String(cnst.AttrClientUserAgent, c.Request.UserAgent()),
+	)
+
+	logger.Info("establishing SSE connection",
 		zap.String("session_id", sessionID),
 		zap.String("prefix", prefix),
 		zap.String("remote_addr", c.Request.RemoteAddr),
 		zap.String("user_agent", c.Request.UserAgent()),
 	)
 
-	conn, err := s.sessions.Register(c.Request.Context(), meta)
+	conn, err := s.sessions.Register(ctx, meta)
 	if err != nil {
-		s.logger.Error("failed to register SSE session",
+		logger.Error("failed to register SSE session",
 			zap.Error(err),
 			zap.String("session_id", sessionID),
 			zap.String("prefix", prefix),
@@ -84,7 +104,7 @@ func (s *Server) handleSSE(c *gin.Context) {
 		return
 	}
 
-	s.logger.Debug("SSE session registered successfully",
+	logger.Debug("SSE session registered successfully",
 		zap.String("session_id", sessionID),
 		zap.String("prefix", prefix),
 	)
@@ -95,14 +115,14 @@ func (s *Server) handleSSE(c *gin.Context) {
 	if ssePrefix != "" {
 		endpointURL = fmt.Sprintf("%s/%s", ssePrefix, endpointURL)
 	}
-	s.logger.Debug("sending initial endpoint event",
+	logger.Debug("sending initial endpoint event",
 		zap.String("session_id", sessionID),
 		zap.String("endpoint_url", endpointURL),
 	)
 
 	_, err = fmt.Fprintf(c.Writer, "event: endpoint\ndata: %s\n\n", endpointURL)
 	if err != nil {
-		s.logger.Error("failed to send initial endpoint event",
+		logger.Error("failed to send initial endpoint event",
 			zap.Error(err),
 			zap.String("session_id", sessionID),
 			zap.String("remote_addr", c.Request.RemoteAddr),
@@ -112,7 +132,7 @@ func (s *Server) handleSSE(c *gin.Context) {
 	}
 	c.Writer.Flush()
 
-	s.logger.Info("SSE connection ready",
+	logger.Info("SSE connection ready",
 		zap.String("session_id", sessionID),
 		zap.String("prefix", prefix),
 		zap.String("remote_addr", c.Request.RemoteAddr),
@@ -123,11 +143,11 @@ func (s *Server) handleSSE(c *gin.Context) {
 		select {
 		case event := <-conn.EventQueue():
 			if event == nil {
-				s.logger.Warn("received nil event for session",
+				logger.Warn("received nil event for session",
 					zap.String("session_id", sessionID),
 				)
 			} else {
-				s.logger.Debug("sending event to SSE client",
+				logger.Debug("sending event to SSE client",
 					zap.String("session_id", sessionID),
 					zap.String("event_type", event.Event),
 					zap.Int("data_size", len(event.Data)),
@@ -136,18 +156,26 @@ func (s *Server) handleSSE(c *gin.Context) {
 
 			switch event.Event {
 			case "message":
+				// Record an event for observability
+				scope.Span.AddEvent("sse.message", oteltrace.WithAttributes(
+					attribute.String("event_type", event.Event),
+					attribute.Int("data_size", len(event.Data)),
+				))
 				_, err = fmt.Fprintf(c.Writer, "event: message\ndata: %s\n\n", event.Data)
 				if err != nil {
-					s.logger.Error("failed to send SSE message",
+					logger.Error("failed to send SSE message",
 						zap.Error(err),
 						zap.String("session_id", sessionID),
 						zap.String("remote_addr", c.Request.RemoteAddr),
 					)
 				}
 			default:
+				scope.Span.AddEvent("sse.event", oteltrace.WithAttributes(
+					attribute.String("event_type", event.Event),
+				))
 				_, err = fmt.Fprint(c.Writer, event)
 				if err != nil {
-					s.logger.Error("failed to write SSE event",
+					logger.Error("failed to write SSE event",
 						zap.Error(err),
 						zap.String("session_id", sessionID),
 						zap.String("event_type", event.Event),
@@ -155,14 +183,14 @@ func (s *Server) handleSSE(c *gin.Context) {
 				}
 			}
 			c.Writer.Flush()
-		case <-c.Request.Context().Done():
-			s.logger.Info("SSE client disconnected",
+		case <-ctx.Done():
+			logger.Info("SSE client disconnected",
 				zap.String("session_id", sessionID),
 				zap.String("remote_addr", c.Request.RemoteAddr),
 			)
 			return
 		case <-s.shutdownCh:
-			s.logger.Info("SSE connection closing due to server shutdown",
+			logger.Info("SSE connection closing due to server shutdown",
 				zap.String("session_id", sessionID),
 			)
 			return
@@ -302,6 +330,12 @@ func (s *Server) handlePostMessage(c *gin.Context, conn session.Connection) {
 		zap.String("session_id", conn.Meta().ID),
 	)
 
+	reqStartTime := time.Now()
+	if s.metrics != nil {
+		s.metrics.McpReqStart(req.Method)
+		defer s.metrics.McpReqDone(req.Method, reqStartTime)
+	}
+
 	switch req.Method {
 	case mcp.NotificationInitialized:
 		s.sendAcceptedResponse(c)
@@ -319,8 +353,16 @@ func (s *Server) handlePostMessage(c *gin.Context, conn session.Connection) {
 				Version: version.Get(),
 			},
 			Capabilities: mcp.ServerCapabilitiesSchema{
+				Logging: mcp.LoggingCapabilitySchema{},
 				Tools: mcp.ToolsCapabilitySchema{
 					ListChanged: true,
+				},
+				Prompts: mcp.PromptsCapabilitySchema{
+					ListChanged: false,
+				},
+				Resources: mcp.ResourcesCapabilitySchema{
+					Subscribe:   false,
+					ListChanged: false,
 				},
 			},
 		}
@@ -368,6 +410,7 @@ func (s *Server) handlePostMessage(c *gin.Context, conn session.Connection) {
 				Description: tool.Description,
 				InputSchema: tool.InputSchema,
 				Annotations: tool.Annotations,
+				Meta:        tool.Meta,
 			}
 		}
 
@@ -393,24 +436,42 @@ func (s *Server) handlePostMessage(c *gin.Context, conn session.Connection) {
 			result *mcp.CallToolResult
 			err    error
 		)
+
+		status := "success"
+
+		toolName := params.Name
+		if s.metrics != nil {
+			toolStartTime := time.Now()
+			s.metrics.ToolExecStart(toolName)
+			defer s.metrics.ToolExecDone(toolName, toolStartTime, &status)
+		}
+
 		switch protoType {
 		case cnst.BackendProtoHttp:
-			result = s.callHTTPTool(c, req, conn, params)
+			result = s.callHTTPTool(c, req, conn, params, true)
+			if result == nil {
+				status = "error"
+				// Error already handled by callHTTPTool
+				return
+			}
 		case cnst.BackendProtoStdio, cnst.BackendProtoSSE, cnst.BackendProtoStreamable:
 			transport := s.state.GetTransport(conn.Meta().Prefix)
 			if transport == nil {
 				errMsg := "Server configuration not found"
 				s.sendProtocolError(c, req.Id, errMsg, http.StatusNotFound, mcp.ErrorCodeMethodNotFound)
+				status = "error"
 				return
 			}
 
 			result, err = transport.CallTool(c.Request.Context(), params, mergeRequestInfo(conn.Meta().Request, c.Request))
 			if err != nil {
 				s.sendToolExecutionError(c, conn, req, err, true)
+				status = "error"
 				return
 			}
 		default:
 			s.sendProtocolError(c, req.Id, "Unsupported protocol type", http.StatusBadRequest, mcp.ErrorCodeInvalidParams)
+			status = "error"
 			return
 		}
 
@@ -552,6 +613,31 @@ func (s *Server) handlePostMessage(c *gin.Context, conn session.Connection) {
 		s.sendSuccessResponse(c, conn, req, resp, true)
 		return
 
+	case mcp.LoggingSetLevel:
+		// Minimal stub: accept requested level and return empty object
+		type params struct {
+			Level string `json:"level"`
+		}
+		var p params
+		_ = json.Unmarshal(req.Params, &p)
+		s.sendSuccessResponse(c, conn, req, struct{}{}, true)
+	case mcp.ResourcesList:
+		s.sendSuccessResponse(c, conn, req, struct {
+			Resources []struct{} `json:"resources"`
+		}{Resources: []struct{}{}}, true)
+	case mcp.ResourcesTemplatesList:
+		s.sendSuccessResponse(c, conn, req, struct {
+			ResourceTemplates []struct{} `json:"resourceTemplates"`
+		}{ResourceTemplates: []struct{}{}}, true)
+	case mcp.ResourcesRead:
+		type params struct {
+			URI string `json:"uri"`
+		}
+		var p params
+		_ = json.Unmarshal(req.Params, &p)
+		s.sendSuccessResponse(c, conn, req, struct {
+			Contents []struct{} `json:"contents"`
+		}{Contents: []struct{}{}}, true)
 	default:
 		s.sendProtocolError(c, req.Id, "Unknown method", http.StatusNotFound, mcp.ErrorCodeMethodNotFound)
 	}
